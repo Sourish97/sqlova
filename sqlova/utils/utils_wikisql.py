@@ -108,6 +108,30 @@ def get_loader_wikisql(data_train, data_dev, bS, shuffle_train=True, shuffle_dev
 
     return train_loader, dev_loader
 
+def get_column_cells(table, headers):
+    # print(table)
+    # print(headers)
+
+    columns = {}
+
+    for header in headers:
+        columns[header] = header + " "
+
+    for row in table['rows']:
+        i = 0
+        for header in headers:
+            # only append string values
+            if isinstance(row[i], str):
+                columns[header] += row[i] + " "
+            i += 1
+
+    # we have a dict, convert into list
+    result = []
+    for header in columns:
+        result.append(columns[header])
+
+    print(result)
+    return result
 
 def get_fields_1(t1, tables, no_hs_t=False, no_sql_t=False):
     nlu1 = t1['question']
@@ -126,6 +150,10 @@ def get_fields_1(t1, tables, no_hs_t=False, no_sql_t=False):
     else:
         hs_t1 = []
     hs1 = tb1['header']
+
+    # append the column-cell contents to the header
+    # and then feed to BERT
+    hs1 = get_column_cells(tb1, hs1)
 
     return nlu1, nlu_t1, tid1, sql_i1, sql_q1, sql_t1, tb1, hs_t1, hs1
 
@@ -497,6 +525,7 @@ def generate_inputs(tokenizer, nlu1_tok, hds1):
     # for doc
     for i, hds11 in enumerate(hds1):
         i_st_hd = len(tokens)
+        print(hds11)
         sub_tok = tokenizer.tokenize(hds11)
         tokens += sub_tok
         i_ed_hd = len(tokens)
@@ -512,6 +541,7 @@ def generate_inputs(tokenizer, nlu1_tok, hds1):
             raise EnvironmentError
 
     i_nlu = (i_st_nlu, i_ed_nlu)
+    #print(tokens)
 
     return tokens, segment_ids, i_nlu, i_hds
 
