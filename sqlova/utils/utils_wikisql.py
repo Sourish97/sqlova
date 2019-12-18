@@ -56,6 +56,12 @@ def load_wikisql_data(path_wikisql, mode='train', toy_model=False, toy_size=10, 
 
     data = []
     table = {}
+
+    num_rows = []
+    less30 = 0
+    less50 = 0
+    more50 = 0
+
     with open(path_sql) as f:
         for idx, line in enumerate(f):
             if toy_model and idx >= toy_size:
@@ -71,7 +77,15 @@ def load_wikisql_data(path_wikisql, mode='train', toy_model=False, toy_size=10, 
 
             t1 = json.loads(line.strip())
             table[t1['id']] = t1
-
+            if idx%100 == 0:
+                print(t1['id'], len(t1['rows']))
+            if len(t1['rows']) <= 30:
+                less30 += 1
+            elif len(t1['rows']) <= 50:
+                less50 += 1
+            else:
+                more50 += 1
+    print("sigmaaa ", less30, less50, more50)
     return data, table
 
 
@@ -108,13 +122,16 @@ def get_loader_wikisql(data_train, data_dev, bS, shuffle_train=True, shuffle_dev
 
     return train_loader, dev_loader
 
-def get_column_cells(table, headers):
+def get_column_cells_naively(table, headers):
     # print(table)
     # print(headers)
 
     columns = {}
 
     for header in headers:
+        # at a bare minimum, we definitely want to add
+        # atleast the header names of all the columns
+        # if not their contents
         columns[header] = header + " "
 
     for row in table['rows']:
@@ -130,8 +147,72 @@ def get_column_cells(table, headers):
     for header in columns:
         result.append(columns[header])
 
-    print(result)
+    # print(result)
     return result
+
+def get_column_cells_selectively(table, nlu):
+
+    columns = {}
+
+    list_of_headers = table['header']
+    append_header_list = [] # will contain the headers whose contents will be used
+
+    nlu = nlu.lower()
+
+    for header in list_of_headers:
+        # at a bare minimum, we definitely want to add
+        # atleast the header names of all the columns
+        # if not their contents
+        columns[header] = header + " "
+
+    # do this only if number of rows is less than 50
+    #if len(table['rows']) <= 20:
+    # part 1:
+    # for each header, check if its appears as it is in the nlu
+    for i, header in enumerate(list_of_headers):
+
+        header = header.lower() # all lower case
+
+        # search this header in nlu
+        if header in nlu:
+            # match! add all column cells of this header as input to BERT
+            # print(header + " present in " + nlu)
+            append_header_list.append(i) # the ith header added to the "append" list
+
+    # part 2
+    # check if a cell content appears in the nlu
+    for row in table['rows']:
+        # for each cell in each row
+        for i, cell in enumerate(row):
+            if isinstance(row[i], str) \
+              and cell.lower() in nlu:
+                # we only append string and not numeric cell
+                if i not in append_header_list:
+                    # print(cell + " found in " + nlu)
+                    append_header_list.append(i)
+
+    # we have the list of the headers whose contents we want to feed as input to BERT
+    # lets actually add them to "columns"
+
+    # do this only
+    # for each row
+    for row in table['rows']:
+        # for each cell in the row
+        for i, cell in enumerate(row):
+            # check if the header is in our list
+            if i in append_header_list and \
+              isinstance(cell, str):
+                header = list_of_headers[i]
+                columns[header] += cell + " "
+
+    # we have a dict, convert into list
+    result = []
+    for header in columns:
+        result.append(columns[header])
+
+    # print(result)
+    return result
+
 
 def get_fields_1(t1, tables, no_hs_t=False, no_sql_t=False):
     nlu1 = t1['question']
@@ -153,7 +234,13 @@ def get_fields_1(t1, tables, no_hs_t=False, no_sql_t=False):
 
     # append the column-cell contents to the header
     # and then feed to BERT
-    hs1 = get_column_cells(tb1, hs1)
+    # hs1 = get_column_cells_naively(tb1, hs1)
+
+    # get column cells more intelligently
+    # we only append the cells of two columns:
+    # 1) when the name of column-header appears in the nlu
+    # 2) when a column's cell appears exactly as is in the nlu
+    hs1 = get_column_cells_selectively(tb1, nlu1)
 
     return nlu1, nlu_t1, tid1, sql_i1, sql_q1, sql_t1, tb1, hs_t1, hs1
 
@@ -521,16 +608,47 @@ def generate_inputs(tokenizer, nlu1_tok, hds1):
     tokens.append("[SEP]")
     segment_ids.append(0)
 
+    # pre-process the header list to check how many should be included
+    sub_token_lengths = []
+    total_length = 0
+    for i, hds11 in enumerate(hds1):
+        sub_tok = tokenizer.tokenize(hds11)
+        sub_token_lengths.append(len(sub_tok))
+        total_length += len(sub_tok)
+
+    max_possible_length = 510 - len(tokens) - len(hds1)
+
+    if total_length > max_possible_length:
+        surplus = 0
+        num_rogue_cols = 0
+        expected_len_per_column = max_possible_length/len(hds1)
+        for i, h in enumerate(hds1):
+            if sub_token_lengths[i] < expected_len_per_column:
+                surplus += (expected_len_per_column - sub_token_lengths[i])
+            else:
+                num_rogue_cols += 1
+
+        # we have 'surplus' empty slots for tokens that we can
+        # distribute equally amongst the rogue columns
+        surplus = surplus / num_rogue_cols
+        for i, h in enumerate(hds1):
+            if sub_token_lengths[i] > expected_len_per_column:
+                sub_token_lengths[i] = min(sub_token_lengths[i], \
+                        (int)(expected_len_per_column + surplus))
+
+    # print("sbtl", sub_token_lengths)
+
     i_hds = []
     # for doc
     for i, hds11 in enumerate(hds1):
         i_st_hd = len(tokens)
-        print(hds11)
+        #print(hds11)
         sub_tok = tokenizer.tokenize(hds11)
-        tokens += sub_tok
+        tokens += sub_tok[:sub_token_lengths[i]]
         i_ed_hd = len(tokens)
+        # print("sigma", sub_tok, len(sub_tok))
         i_hds.append((i_st_hd, i_ed_hd))
-        segment_ids += [1] * len(sub_tok)
+        segment_ids += [1] * sub_token_lengths[i]
         if i < len(hds1)-1:
             tokens.append("[SEP]")
             segment_ids.append(0)
@@ -541,7 +659,7 @@ def generate_inputs(tokenizer, nlu1_tok, hds1):
             raise EnvironmentError
 
     i_nlu = (i_st_nlu, i_ed_nlu)
-    #print(tokens)
+    # print("ttl",len(tokens))
 
     return tokens, segment_ids, i_nlu, i_hds
 
@@ -742,8 +860,6 @@ def get_bert_output(model_bert, tokenizer, nlu_t, hds, max_seq_length):
         l_n.append(len(nlu_tt1))
         #         hds1_all_tok = tokenize_hds1(tokenizer, hds1)
 
-
-
         # [CLS] nlu [SEP] col1 [SEP] col2 [SEP] ...col-n [SEP]
         # 2. Generate BERT inputs & indices.
         tokens1, segment_ids1, i_nlu1, i_hds1 = generate_inputs(tokenizer, nlu_tt1, hds1)
@@ -779,6 +895,11 @@ def get_bert_output(model_bert, tokenizer, nlu_t, hds, max_seq_length):
 
     # 4. Generate BERT output.
     all_encoder_layer, pooled_output = model_bert(all_input_ids, all_segment_ids, all_input_mask)
+    '''print("ael-len", len(all_encoder_layer), "pooled-len", len(pooled_output))
+    for l in all_encoder_layer:
+        print("ael_shape", l.shape)
+    for l in pooled_output:
+        print("pooled_shape", l.shape)'''
 
     # 5. generate l_hpu from i_hds
     l_hpu = gen_l_hpu(i_hds)
